@@ -17,23 +17,23 @@ using whatever mechanism is available in the host shell--this two-phase solution
 has been developed as a compatibility measure with `eval $(starship init X)`
 */
 
-fn path_to_starship() -> io::Result<String> {
-    let current_exe = env::current_exe()?
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "can't convert to str"))?
-        .to_string();
-    Ok(current_exe)
+fn path_to_starship() -> String {
+    env::args()
+        .next()
+        .unwrap_or_else(|| String::from(crate_name!()))
+        .replace("\"", "\"'\"'\"")
 }
 
 /* This prints the setup stub, the short piece of code which sets up the main
 init code. The stub produces the main init script, then evaluates it with
 `source` and process substitution */
 pub fn init_stub(shell_name: &str) -> io::Result<()> {
+    let starship = path_to_starship();
+
+    log::debug!("Starship: {}", starship);
     log::debug!("Shell name: {}", shell_name);
 
     let shell_basename = Path::new(shell_name).file_stem().and_then(OsStr::to_str);
-
-    let starship = path_to_starship()?.replace("\"", "\"'\"'\"");
 
     let setup_stub = match shell_basename {
         Some("bash") => {
@@ -143,7 +143,7 @@ fi"#,
 /* This function (called when `--print-full-init` is passed to `starship init`)
 prints out the main initialization script */
 pub fn init_main(shell_name: &str) -> io::Result<()> {
-    let starship_path = path_to_starship()?.replace("\"", "\"'\"'\"");
+    let starship_path = path_to_starship();
 
     let setup_script = match shell_name {
         "bash" => Some(BASH_INIT),
