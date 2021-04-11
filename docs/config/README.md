@@ -1939,11 +1939,12 @@ symbol = "☁️ "
 ## Package Version
 
 The `package` module is shown when the current directory is the repository for a
-package, and shows its current version. The module currently supports `npm`, `cargo`,
+package, and shows its current version. The module currently supports `npm`, `nimble`, `cargo`,
 `poetry`, `composer`, `gradle`, `julia`, `mix` and `helm` packages.
 
 - **npm** – The `npm` package version is extracted from the `package.json` present
   in the current directory
+- **nimble** - The `nimble` package version is extracted from the `nimble dump` present
 - **cargo** – The `cargo` package version is extracted from the `Cargo.toml` present
   in the current directory
 - **poetry** – The `poetry` package version is extracted from the `pyproject.toml` present
