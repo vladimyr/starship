@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::{Context, Module, RootModuleConfig};
 use crate::configs::package::PackageConfig;
 use crate::formatter::StringFormatter;
@@ -14,7 +16,7 @@ use serde_json as json;
 pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     let mut module = context.new_module("package");
     let config: PackageConfig = PackageConfig::try_load(module.config);
-    let module_version = get_package_version(context, &config)?;
+    let module_version = get_package_version(&context.current_dir, &config)?;
 
     let parsed = StringFormatter::new(config.format).and_then(|formatter| {
         formatter
@@ -52,13 +54,12 @@ fn extract_cargo_version(file_contents: &str) -> Option<String> {
     Some(formatted_version)
 }
 
-fn extract_nimble_version(context: &Context) -> Option<String> {
-    let cmd_output = context.exec_cmd("nimble", &["dump", "--json"])?;
+fn extract_nimble_version(file_contents: &str) -> Option<String> {
+    let re = Regex::new(r#"(?m)^\s*version\s*=\s*"(?P<version>[^"]+)""#).ok()?;
+    let captures = re.captures(file_contents)?;
+    let version = &captures["version"];
 
-    let nimble_json: json::Value = json::from_str(&cmd_output.stdout).ok()?;
-    let raw_version = nimble_json.get("version")?.as_str()?;
-
-    let formatted_version = format_version(raw_version);
+    let formatted_version = format_version(version);
     Some(formatted_version)
 }
 
@@ -180,17 +181,13 @@ fn extract_meson_version(file_contents: &str) -> Option<String> {
     Some(formatted_version)
 }
 
-fn get_package_version(context: &Context, config: &PackageConfig) -> Option<String> {
-    let base_dir = &context.current_dir;
-
+fn get_package_version(base_dir: &Path, config: &PackageConfig) -> Option<String> {
     if let Ok(cargo_toml) = utils::read_file(base_dir.join("Cargo.toml")) {
         extract_cargo_version(&cargo_toml)
-    } else if context
-        .try_begin_scan()?
-        .set_extensions(&["nimble"])
-        .is_match()
+    } else if let Ok(nimble_file) =
+        utils::read_file(base_dir.join(format!("{}.nimble", base_dir.file_name()?.to_str()?)))
     {
-        extract_nimble_version(context)
+        extract_nimble_version(&nimble_file)
     } else if let Ok(package_json) = utils::read_file(base_dir.join("package.json")) {
         extract_package_version(&package_json, config.display_private)
     } else if let Ok(poetry_toml) = utils::read_file(base_dir.join("pyproject.toml")) {
@@ -226,9 +223,9 @@ fn format_version(version: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test::ModuleRenderer, utils::CommandOutput};
+    use crate::test::ModuleRenderer;
     use ansi_term::Color;
-    use std::fs::File;
+    use std::fs::{self, File};
     use std::io;
     use std::io::Write;
     use tempfile::TempDir;
@@ -266,82 +263,21 @@ mod tests {
 
     #[test]
     fn test_extract_nimble_package_version() -> io::Result<()> {
-        let config_name = "test_project.nimble";
-
-        let config_content = r##"
+        let project_name = "test_project";
+        let config_name = format!("{}.nimble", project_name);
+        let config_content = r#"
 version = "0.1.0"
 author = "Mr. nimble"
 description = "A new awesome nimble package"
 license = "MIT"
-"##;
+"#;
 
-        let project_dir = create_project_dir()?;
-        fill_config(&project_dir, config_name, Some(&config_content))?;
-
-        let starship_config = toml::toml! {
-            [package]
-            disabled = false
-        };
-        let actual = ModuleRenderer::new("package")
-            .cmd(
-                "nimble dump --json",
-                Some(CommandOutput {
-                    stdout: r##"
-{
-  "name": "test_project.nimble",
-  "version": "0.1.0",
-  "author": "Mr. nimble",
-  "desc": "A new awesome nimble package",
-  "license": "MIT",
-  "skipDirs": [],
-  "skipFiles": [],
-  "skipExt": [],
-  "installDirs": [],
-  "installFiles": [],
-  "installExt": [],
-  "requires": [],
-  "bin": [],
-  "binDir": "",
-  "srcDir": "",
-  "backend": "c"
-}
-"##
-                    .to_owned(),
-                    stderr: "".to_owned(),
-                }),
-            )
-            .path(project_dir.path())
-            .config(starship_config)
-            .collect();
-
-        let expected = Some(format!(
-            "is {} ",
-            Color::Fixed(208).bold().paint(format!("📦 {}", "v0.1.0"))
-        ));
-
-        assert_eq!(actual, expected);
-        project_dir.close()
-    }
-
-    #[test]
-    fn test_extract_nimble_package_version_for_non_nimble_directory() -> io::Result<()> {
-        // Only create an empty directory. There's no .nibmle file for this case.
-        let project_dir = create_project_dir()?;
-
-        let starship_config = toml::toml! {
-            [package]
-            disabled = false
-        };
-        let actual = ModuleRenderer::new("package")
-            .cmd("nimble dump --json", None)
-            .path(project_dir.path())
-            .config(starship_config)
-            .collect();
-
-        let expected = None;
-
-        assert_eq!(actual, expected);
-        project_dir.close()
+        let tempdir = tempfile::tempdir()?;
+        let project_dir = tempdir.path().join(project_name);
+        fs::create_dir(&project_dir)?;
+        fill_config(&project_dir, &config_name, Some(&config_content))?;
+        expect_output(&project_dir, Some("v0.1.0"), None);
+        tempdir.close()
     }
 
     #[test]
@@ -868,24 +804,28 @@ end";
         tempfile::tempdir()
     }
 
-    fn fill_config(
-        project_dir: &TempDir,
+    fn fill_config<P: AsRef<Path>>(
+        project_dir: P,
         file_name: &str,
         contents: Option<&str>,
     ) -> io::Result<()> {
-        let mut file = File::create(project_dir.path().join(file_name))?;
+        let mut file = File::create(project_dir.as_ref().join(file_name))?;
         file.write_all(contents.unwrap_or("").as_bytes())?;
         file.sync_all()
     }
 
-    fn expect_output(project_dir: &TempDir, contains: Option<&str>, config: Option<toml::Value>) {
+    fn expect_output<P: AsRef<Path>>(
+        project_dir: P,
+        contains: Option<&str>,
+        config: Option<toml::Value>,
+    ) {
         let starship_config = config.unwrap_or(toml::toml! {
             [package]
             disabled = false
         });
 
         let actual = ModuleRenderer::new("package")
-            .path(project_dir.path())
+            .path(project_dir.as_ref())
             .config(starship_config)
             .collect();
         let text = String::from(contains.unwrap_or(""));
